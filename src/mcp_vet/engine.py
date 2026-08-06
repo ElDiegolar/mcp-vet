@@ -14,10 +14,11 @@ from mcp_vet.cache import VerdictCache
 from mcp_vet.scan import auth, deps, exec as exec_scan, provenance, secrets, ssrf
 from mcp_vet.verdict import Finding, Verdict
 
-TEXT_EXT = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".json", ".toml", ".txt", ".cfg", ".ini", ".sh", ".md", ".yaml", ".yml"}
+TEXT_EXT = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".json", ".toml", ".txt", ".cfg", ".ini", ".sh", ".yaml", ".yml"}
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", ".pytest_cache", ".mypy_cache", "site-packages"}
 UA = {"User-Agent": "mcp-vet/0.1 (trust-scan gate)"}
 NETWORK_CALL = re.compile(r"\b(requests\.|urlopen|fetch\(|axios\.|child_process\.exec|got\()")
+LOCALHOST_ONLY = re.compile(r"localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0")
 
 
 def _read(path: Path) -> str:
@@ -44,14 +45,18 @@ def scan_local_dir(directory: Path) -> tuple[list[Finding], int]:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         for fn in files:
             p = Path(root) / fn
-            if p.suffix.lower() not in TEXT_EXT:
+            if p.suffix.lower() not in TEXT_EXT or fn.endswith(".map"):
                 continue
             rel = str(p.relative_to(directory))
             text = _read(p)
             count += 1
             source_files.append((rel, text))
-            if NETWORK_CALL.search(text):
-                makes_network = True
+            # network calls to LOCALHOST only (DevTools, local daemons) are
+            # local-by-nature and must not trigger the auth medium
+            for line in text.splitlines():
+                if NETWORK_CALL.search(line) and not LOCALHOST_ONLY.search(line):
+                    makes_network = True
+                    break
             findings += _scan_text(text, rel)
     findings += auth.scan("\n".join(t for _, t in source_files), makes_network_calls=makes_network)
     findings += deps.scan_dir(source_files)

@@ -16,6 +16,13 @@ TEMPLATE_URL = re.compile(r"https?://[^\"'\s]*\{", re.S)
 # variable-looking first arg (not a literal URL string)
 IS_LITERAL_URL = re.compile(r"^[\"']https?://")
 WHITESPACE = re.compile(r"\s+")
+LOCALHOST = re.compile(r"://(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)")
+
+
+def _is_localhost_url(url: str) -> bool:
+    """SSRF is about REMOTE hosts; localhost templates (DevTools, local daemons)
+    are a normal pattern and must not be flagged."""
+    return bool(LOCALHOST.search(url))
 
 
 def _first_arg(inner: str) -> str:
@@ -46,6 +53,8 @@ def scan(text: str, path: str = "") -> list[Finding]:
         arg = _first_arg(m.group(1))
         if not arg or IS_LITERAL_URL.match(arg) or arg in literals:
             continue
+        if _is_localhost_url(arg):
+            continue
         line = text[: m.start()].count("\n") + 1
         findings.append(
             Finding(
@@ -60,6 +69,8 @@ def scan(text: str, path: str = "") -> list[Finding]:
             )
         )
     for m in TEMPLATE_URL.finditer(text):
+        if _is_localhost_url(m.group(0)):
+            continue
         line = text[: m.start()].count("\n") + 1
         findings.append(
             Finding(

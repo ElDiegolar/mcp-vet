@@ -46,13 +46,15 @@ class Verdict:
     @classmethod
     def from_findings(cls, findings: list[Finding]) -> "Verdict":
         highs = [f for f in findings if f.severity == Severity.HIGH]
+        mediums = [f for f in findings if f.severity == Severity.MEDIUM]
         if highs:
             level = Level.BLOCK
-        elif findings:
+        elif mediums:
             level = Level.REVIEW
         else:
+            # LOW-only (informational) findings do not block a SAFE verdict
             level = Level.SAFE
-        summary = f"{len(findings)} finding(s); {len(highs)} high severity."
+        summary = f"{len(findings)} finding(s); {len(highs)} high, {len(mediums)} medium."
         return cls(level=level, findings=findings, summary=summary)
 
     def to_dict(self) -> dict:

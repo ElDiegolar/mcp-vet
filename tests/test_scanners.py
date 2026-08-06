@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from mcp_vet.cache import VerdictCache  # noqa: E402
 from mcp_vet.engine import resolve_target, scan_local_dir  # noqa: E402
 from mcp_vet.scan import auth, deps, exec as exec_scan, secrets, ssrf  # noqa: E402
-from mcp_vet.verdict import Level, Severity, Verdict  # noqa: E402
+from mcp_vet.verdict import Finding, Level, Severity, Verdict  # noqa: E402
 
 CORPUS = Path(__file__).parent / "corpus"
 
@@ -47,6 +47,15 @@ class TestSsrfScanner(unittest.TestCase):
         f = ssrf.scan('url = "https://api.example.com/x"\nrequests.get(url)', "a.py")
         self.assertEqual(f, [])
 
+    def test_localhost_template_clean(self):
+        # DevTools-style localhost template URL: NOT an SSRF (remote-host risk)
+        f = ssrf.scan("fetch(`http://localhost:${port}/json/version`)", "a.py")
+        self.assertEqual(f, [])
+
+    def test_remote_template_flagged(self):
+        f = ssrf.scan("fetch(`https://${host}/internal`)", "a.py")
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
 
 class TestExecScanner(unittest.TestCase):
     def test_shell_true(self):
@@ -73,7 +82,11 @@ class TestSecretsScanner(unittest.TestCase):
 
     def test_env_read(self):
         f = secrets.scan('open(".env")', "a.py")
-        self.assertTrue(any(x.severity == Severity.MEDIUM for x in f))
+        self.assertTrue(any(x.severity == Severity.LOW for x in f))
+
+    def test_env_read_and_send(self):
+        f = secrets.scan('requests.post(url, data=open(".env").read())', "a.py")
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
 
 
 class TestAuthScanner(unittest.TestCase):
@@ -104,6 +117,39 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(resolve_target("gh:owner/repo"), ("github", "owner/repo"))
         self.assertEqual(resolve_target("bare"), ("npm", "bare"))
         self.assertEqual(resolve_target(".")[0], "local")
+
+    def _scan_dir_with(self, code: str):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "srv.py").write_text(code, encoding="utf-8")
+            findings, _ = scan_local_dir(Path(td))
+            return findings
+
+    def test_localhost_network_auth_low(self):
+        f = self._scan_dir_with('resp = fetch("http://localhost:8080/version")')
+        auths = [x for x in f if x.scanner == "auth"]
+        self.assertTrue(auths and all(x.severity == Severity.LOW for x in auths))
+
+    def test_remote_network_auth_medium(self):
+        f = self._scan_dir_with('resp = fetch("https://api.remote.example/x")')
+        auths = [x for x in f if x.scanner == "auth"]
+        self.assertTrue(auths and any(x.severity == Severity.MEDIUM for x in auths))
+
+
+class TestVerdict(unittest.TestCase):
+    def test_low_only_is_safe(self):
+        v = Verdict.from_findings([
+            Finding(scanner="auth", severity=Severity.LOW, message="info")])
+        self.assertEqual(v.level, Level.SAFE)
+
+    def test_medium_is_review(self):
+        v = Verdict.from_findings([
+            Finding(scanner="ssrf", severity=Severity.MEDIUM, message="m")])
+        self.assertEqual(v.level, Level.REVIEW)
+
+    def test_high_is_blocked(self):
+        v = Verdict.from_findings([
+            Finding(scanner="exec", severity=Severity.HIGH, message="h")])
+        self.assertEqual(v.level, Level.BLOCK)
 
 
 class TestCache(unittest.TestCase):
