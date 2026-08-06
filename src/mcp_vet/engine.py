@@ -1,4 +1,8 @@
-"""Scan engine: target resolution, source acquisition, orchestration."""
+"""Scan engine: target resolution, source acquisition, orchestration, policy.
+
+The framework core: `vet()` returns a VetResult; the CLI and the MCP server
+are thin serializations of the same call.
+"""
 from __future__ import annotations
 
 import io
@@ -6,21 +10,54 @@ import os
 import re
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp_vet.cache import VerdictCache
+from mcp_vet.policy import DEFAULT, Policy
 from mcp_vet.scan import auth, deps, exec as exec_scan, provenance, secrets, ssrf
-from mcp_vet.verdict import Finding, Verdict
+from mcp_vet.verdict import Finding, Severity, Verdict
 
 TEXT_EXT = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".json", ".toml", ".txt", ".cfg", ".ini", ".sh", ".yaml", ".yml"}
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", ".pytest_cache", ".mypy_cache", "site-packages"}
-UA = {"User-Agent": "mcp-vet/0.1 (trust-scan gate)"}
+UA = {"User-Agent": "mcp-vet/0.2 (trust-scan framework)"}
 NETWORK_CALL = re.compile(r"\b(requests\.|urlopen|fetch\(|axios\.|child_process\.exec|got\()")
 LOCALHOST_ONLY = re.compile(r"localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0")
 
+# --- policy helpers ---------------------------------------------------------
+FAKE_SECRET = re.compile(r"(?i)(test|example|fake|sample|demo|xxxx|placeholder|changeme|sk-test|your[-_ ]?key)")
+LITERAL_HOST = re.compile(r"https?://[^{}$\s/\"'`]+")
+EXAMPLE_OR_TEST = re.compile(r"(?:^|/)(examples?|tests?|fixtures?|samples?|docs?_?src?)(?:/|$)")
 
+
+def _apply_policy(findings: list[Finding], policy: Policy) -> list[Finding]:
+    out: list[Finding] = []
+    for f in findings:
+        sev = f.severity
+        if policy.examples_are_informational and EXAMPLE_OR_TEST.search(f.file or ""):
+            sev = Severity.LOW
+        elif policy.fake_secrets_ignored and f.scanner == "secrets" \
+                and sev == Severity.HIGH and FAKE_SECRET.search(f.evidence or ""):
+            sev = Severity.LOW
+        elif policy.trusted_host_auth_ok and f.scanner == "secrets" \
+                and sev == Severity.HIGH and "exfiltration" in f.message \
+                and LITERAL_HOST.search(f.evidence or ""):
+            sev = Severity.LOW
+        elif policy.host_interp_is_review and f.scanner == "ssrf" \
+                and sev == Severity.HIGH and "interpolates into the HOST" in f.message:
+            sev = Severity.MEDIUM
+        if sev is f.severity:
+            out.append(f)
+        else:
+            out.append(Finding(scanner=f.scanner, severity=sev, message=f.message,
+                               file=f.file, line=f.line, evidence=f.evidence))
+    return out
+
+
+# --- source acquisition -----------------------------------------------------
 def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -28,19 +65,45 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _scan_text(text: str, path: str) -> list[Finding]:
-    out: list[Finding] = []
-    out += ssrf.scan(text, path)
-    out += exec_scan.scan(text, path)
-    out += secrets.scan(text, path)
-    return out
+def _extract_tar(url: str, dest: Path) -> None:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+        data = r.read()
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        tf.extractall(dest, filter="data")
 
 
-def scan_local_dir(directory: Path) -> tuple[list[Finding], int]:
+def _extract_zip(url: str, dest: Path) -> None:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+        data = r.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(dest)
+
+
+def _download(kind: str, name: str, dest: Path) -> None:
+    if kind == "npm":
+        meta = provenance.npm_meta(name)
+        _extract_tar(meta["tarball"], dest)
+    elif kind == "pypi":
+        info = provenance.pypi_meta(name)
+        url = info.get("sdist_url") or info.get("wheel_url")
+        if url and url.endswith(".whl"):
+            _extract_zip(url, dest)
+        elif url:
+            _extract_tar(url, dest)
+    elif kind == "github":
+        _extract_tar(f"https://codeload.github.com/{name}/tar.gz/refs/heads/main", dest)
+
+
+def scan_text(text: str, path: str = "") -> list[Finding]:
+    return ssrf.scan(text, path) + exec_scan.scan(text, path) + secrets.scan(text, path)
+
+
+def scan_local_dir(directory: Path | str, policy: Policy = DEFAULT) -> tuple[list[Finding], int]:
+    directory = Path(directory)
     findings: list[Finding] = []
     source_files: list[tuple[str, str]] = []
-    makes_network = False
     count = 0
+    makes_network = False
     for root, dirs, files in os.walk(directory):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         for fn in files:
@@ -51,78 +114,81 @@ def scan_local_dir(directory: Path) -> tuple[list[Finding], int]:
             text = _read(p)
             count += 1
             source_files.append((rel, text))
-            # network calls to LOCALHOST only (DevTools, local daemons) are
-            # local-by-nature and must not trigger the auth medium
             for line in text.splitlines():
                 if NETWORK_CALL.search(line) and not LOCALHOST_ONLY.search(line):
                     makes_network = True
                     break
-            findings += _scan_text(text, rel)
+            findings += scan_text(text, rel)
     findings += auth.scan("\n".join(t for _, t in source_files), makes_network_calls=makes_network)
     findings += deps.scan_dir(source_files)
-    return findings, count
+    return _apply_policy(findings, policy), count
 
 
-def extract_tarball(url: str, dest: Path) -> bool:
-    try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = r.read()
-        if url.endswith(".zip") or url.endswith(".whl"):
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
-                z.extractall(dest)
-        else:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
-                t.extractall(dest, filter="data")
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+@dataclass
+class VetResult:
+    target: str
+    kind: str
+    version: str | None
+    verdict: Verdict
+    provenance: dict
+    files_scanned: int
+    duration_s: float
+
+    def to_dict(self) -> dict:
+        return {
+            "target": self.target,
+            "kind": self.kind,
+            "version": self.version,
+            "verdict": self.verdict.to_dict(),
+            "provenance": self.provenance,
+            "files_scanned": self.files_scanned,
+            "duration_s": round(self.duration_s, 2),
+        }
 
 
-def download_source(kind: str, name: str, dest: Path) -> str | None:
-    """Download+extract source; return version string if known."""
-    if kind == "npm":
-        p = provenance.from_npm(name)
-        latest = p.version or "latest"
-        dist = _npm_tarball_url(name, latest)
-        if dist and extract_tarball(dist, dest):
-            return latest
-    elif kind == "pypi":
-        p = provenance.from_pypi(name)
-        url = _pypi_sdist_url(name, p.version)
-        if url and extract_tarball(url, dest):
-            return p.version
-    elif kind == "github":
-        for branch in ("main", "master"):
-            if extract_tarball(f"https://codeload.github.com/{name}/tar.gz/refs/heads/{branch}", dest):
-                return branch
-    return None
-
-
-def _npm_tarball_url(pkg: str, version: str) -> str | None:
-    import json
-    try:
-        req = urllib.request.Request(
-            f"https://registry.npmjs.org/{pkg.replace('@', '%40')}/{version}", headers=UA)
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
-        return (data.get("dist") or {}).get("tarball")
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _pypi_sdist_url(pkg: str, version: str) -> str | None:
-    import json
-    try:
-        req = urllib.request.Request(f"https://pypi.org/pypi/{pkg}/{version}/json", headers=UA)
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
-        for u in data.get("urls", []):
-            if u.get("packagetype") == "sdist":
-                return u["url"]
-        return (data.get("urls") or [{}])[0].get("url")
-    except Exception:  # noqa: BLE001
-        return None
+def vet(target: str, use_cache: bool = True, policy: Policy = DEFAULT,
+        cache: VerdictCache | None = None) -> VetResult:
+    """The framework's single entry point: vet any target, get a VetResult."""
+    t0 = time.time()
+    kind, name = resolve_target(target)
+    cache = cache or VerdictCache()
+    if kind == "local":
+        # local targets always re-scan (the code is right there; cache is moot)
+        findings, count = scan_local_dir(name, policy=policy)
+        return VetResult(target=target, kind=kind, version=None,
+                         verdict=Verdict.from_findings(findings),
+                         provenance={"source": "local directory"},
+                         files_scanned=count, duration_s=time.time() - t0)
+    meta = provenance.meta(kind, name)
+    version = meta.get("version", "")
+    if use_cache:
+        cached = cache.get(f"{kind}:{name}", version)
+        if cached and "verdict" in cached:
+            return VetResult(target=target, kind=kind, version=version,
+                             verdict=Verdict.from_dict(cached["verdict"]),
+                             provenance=cached.get("provenance", meta),
+                             files_scanned=cached.get("files_scanned", 0),
+                             duration_s=time.time() - t0)
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            _download(kind, name, Path(td))
+        except Exception as e:  # noqa: BLE001
+            return VetResult(target=target, kind=kind, version=version,
+                             verdict=Verdict.from_findings([Finding(
+                                 scanner="provenance", severity=Severity.MEDIUM,
+                                 message=f"failed to download source: {e}",
+                                 file="", line=0, evidence="")]),
+                             provenance=meta, files_scanned=0,
+                             duration_s=time.time() - t0)
+        findings, count = scan_local_dir(Path(td), policy=policy)
+    v = Verdict.from_findings(findings)
+    if use_cache:
+        cache.put(f"{kind}:{name}", version,
+                  {"verdict": v.to_dict(), "provenance": meta,
+                   "files_scanned": count})
+    return VetResult(target=target, kind=kind, version=version, verdict=v,
+                     provenance=meta, files_scanned=count,
+                     duration_s=time.time() - t0)
 
 
 def resolve_target(target: str) -> tuple[str, str]:
@@ -135,48 +201,3 @@ def resolve_target(target: str) -> tuple[str, str]:
     if "/" in target and not target.startswith("@"):
         return "github", target
     return "npm", target
-
-
-def vet(target: str, use_cache: bool = True, ttl_s: int = 24 * 3600) -> dict:
-    kind, name = resolve_target(target)
-    cache = VerdictCache(ttl_s=ttl_s) if use_cache else None
-
-    if kind == "local":
-        findings, nfiles = scan_local_dir(Path(name))
-        prov = provenance.Provenance(kind="local", name=str(Path(name).resolve()))
-        version = "local"
-    else:
-        # provenance first (also gives us version + download URL)
-        if kind == "npm":
-            prov = provenance.from_npm(name)
-        elif kind == "pypi":
-            prov = provenance.from_pypi(name)
-        else:
-            prov = provenance.from_github(name)
-        version = prov.version or "unknown"
-        if cache:
-            hit = cache.get(target, version)
-            if hit:
-                hit["_cached"] = True
-                return hit
-        with tempfile.TemporaryDirectory(prefix="mcpvet-") as td:
-            dl_version = download_source(kind, name, Path(td))
-            if dl_version:
-                version = dl_version
-            findings, nfiles = scan_local_dir(Path(td))
-
-    findings += prov.findings
-    verdict = Verdict.from_findings(findings)
-    result = {
-        "target": target,
-        "kind": kind,
-        "name": name,
-        "version": version,
-        "source_url": prov.source_url,
-        "license": prov.license,
-        "files_scanned": nfiles,
-        "verdict": verdict.to_dict(),
-    }
-    if cache:
-        cache.put(target, version, result)
-    return result

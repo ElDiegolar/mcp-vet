@@ -36,6 +36,17 @@ class Finding:
             "evidence": self.evidence,
         }
 
+    @staticmethod
+    def from_dict(d: dict) -> "Finding":
+        return Finding(
+            scanner=d.get("scanner", ""),
+            severity=Severity(d.get("severity", "low")),
+            message=d.get("message", ""),
+            file=d.get("file", ""),
+            line=d.get("line", 0),
+            evidence=d.get("evidence", ""),
+        )
+
 
 @dataclass
 class Verdict:
@@ -63,3 +74,11 @@ class Verdict:
             "summary": self.summary,
             "findings": [f.to_dict() for f in self.findings],
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Verdict":
+        return cls(
+            level=Level(d.get("level", "SAFE_TO_INSTALL")),
+            findings=[Finding.from_dict(f) for f in d.get("findings", [])],
+            summary=d.get("summary", ""),
+        )

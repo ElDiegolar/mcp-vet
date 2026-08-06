@@ -8,7 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from mcp_vet.cache import VerdictCache  # noqa: E402
-from mcp_vet.engine import resolve_target, scan_local_dir  # noqa: E402
+from mcp_vet.adapters import config_for, list_adapters  # noqa: E402
+from mcp_vet.engine import resolve_target, scan_local_dir, vet  # noqa: E402
+from mcp_vet.policy import Policy  # noqa: E402
 from mcp_vet.scan import auth, deps, exec as exec_scan, secrets, ssrf  # noqa: E402
 from mcp_vet.verdict import Finding, Level, Severity, Verdict  # noqa: E402
 
@@ -55,6 +57,15 @@ class TestSsrfScanner(unittest.TestCase):
     def test_remote_template_flagged(self):
         f = ssrf.scan("fetch(`https://${host}/internal`)", "a.py")
         self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_path_interp_not_ssrf(self):
+        # fixed trusted host + dynamic path = normal API client, NOT SSRF
+        f = ssrf.scan("fetch(`https://api.github.com/repos/${owner}/${repo}`)", "a.py")
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_literal_host_dynamic_path_low(self):
+        f = ssrf.scan('requests.get(f"https://api.example.com/{item_id}")', "a.py")
+        self.assertFalse(any(x.severity >= Severity.MEDIUM for x in f))
 
 
 class TestExecScanner(unittest.TestCase):
@@ -150,6 +161,153 @@ class TestVerdict(unittest.TestCase):
         v = Verdict.from_findings([
             Finding(scanner="exec", severity=Severity.HIGH, message="h")])
         self.assertEqual(v.level, Level.BLOCK)
+
+
+class TestAdapters(unittest.TestCase):
+    def test_registry(self):
+        names = list_adapters()
+        for want in ("generic", "claude-code", "cursor", "vscode", "hermes"):
+            self.assertIn(want, names)
+
+    def test_emit_shape(self):
+        from mcp_vet.adapters import config_for
+        from mcp_vet.adapters.base import ServerSpec
+        spec = ServerSpec(name="files", command="uvx", args=["mcp-files"],
+                          env={"K": "V"})
+        for h in list_adapters():
+            out = config_for(h, spec)
+            self.assertIn("harness", out)
+            self.assertIn("config", out)
+            self.assertIn("file", out)
+            self.assertIn("instructions", out)
+            self.assertEqual(out["harness"], h)
+
+    def test_claude_install_command(self):
+        from mcp_vet.adapters import config_for
+        from mcp_vet.adapters.base import ServerSpec
+        out = config_for("claude-code",
+                         ServerSpec(name="files", command="uvx", args=["mcp-files"]))
+        self.assertIn("claude mcp add files -- uvx mcp-files",
+                      out["instructions"])
+
+    def test_vscode_schema(self):
+        from mcp_vet.adapters import config_for
+        from mcp_vet.adapters.base import ServerSpec
+        out = config_for("vscode", ServerSpec(name="s", command="uvx", args=["x"]))
+        self.assertIn("servers", out["config"])
+        self.assertEqual(out["config"]["servers"]["s"]["type"], "stdio")
+
+    def test_hermes_schema(self):
+        from mcp_vet.adapters import config_for
+        from mcp_vet.adapters.base import ServerSpec
+        out = config_for("hermes", ServerSpec(name="s", command="uvx", args=["x"]))
+        self.assertIn("mcp_servers", out["config"])
+        entry = out["config"]["mcp_servers"]["s"]
+        self.assertEqual(entry["command"], "uvx")
+        self.assertEqual(entry["args"], ["x"])
+
+
+class TestPolicy(unittest.TestCase):
+    def _dir_with(self, rel: str, code: str):
+        td = tempfile.TemporaryDirectory()
+        p = Path(td.name) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(code, encoding="utf-8")
+        self.addCleanup(td.cleanup)
+        return td.name
+
+    def test_examples_informational_by_default(self):
+        d = self._dir_with("examples/foo.py", "return eval(code)")
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_examples_high_in_strict(self):
+        d = self._dir_with("examples/foo.py", "return eval(code)")
+        f, _ = scan_local_dir(d, policy=Policy(strict=True))
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_fake_secret_not_high(self):
+        d = self._dir_with("srv.py", 'token = "sk-test-abcdefgh"')
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_real_secret_high(self):
+        d = self._dir_with("srv.py", 'token = "sk-live-9f8e7d6c5b4a39281706"')
+        f, _ = scan_local_dir(d)
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_trusted_host_auth_low(self):
+        d = self._dir_with(
+            "srv.py",
+            'requests.post("https://api.trusted.example/collect", '
+            'json={"token": "real-key-12345678"})')
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_variable_host_exfil_high(self):
+        d = self._dir_with(
+            "srv.py",
+            'requests.post(f"https://{host}/collect", '
+            'json={"token": "real-key-12345678"})')
+        f, _ = scan_local_dir(d)
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_host_interp_is_review_by_default(self):
+        d = self._dir_with("srv.py", "fetch(`https://${host}/internal`)")
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+        self.assertTrue(any(x.severity == Severity.MEDIUM and x.scanner == "ssrf"
+                            for x in f))
+
+    def test_host_interp_high_in_strict(self):
+        d = self._dir_with("srv.py", "fetch(`https://${host}/internal`)")
+        f, _ = scan_local_dir(d, policy=Policy(strict=True))
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_credentials_to_host_constant_low(self):
+        d = self._dir_with(
+            "srv.py",
+            'API_URL = "https://api.trusted.example/collect"\n'
+            'requests.post(API_URL, json={"token": "real-key-12345678"})')
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_creds_to_host_defined_in_file_low(self):
+        # variable arg, but the file names a literal host somewhere: LOW
+        d = self._dir_with(
+            "srv.py",
+            'BASE = "https://api.trusted.example"\n'
+            'requests.post(url, json={"token": "real-key-12345678"})')
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+    def test_creds_to_unnamed_host_high(self):
+        # host nowhere in the file: the exfil shape — HIGH
+        d = self._dir_with(
+            "srv.py",
+            'requests.post(url, json={"token": "real-key-12345678"})')
+        f, _ = scan_local_dir(d)
+        self.assertTrue(any(x.severity == Severity.HIGH for x in f))
+
+    def test_docs_informational(self):
+        d = self._dir_with("docs_src/tutorial.py", "return eval(code)")
+        f, _ = scan_local_dir(d)
+        self.assertFalse(any(x.severity == Severity.HIGH for x in f))
+
+
+class TestVetResult(unittest.TestCase):
+    def test_vet_local_returns_vetresult(self):
+        r = vet("./tests/corpus/known_good", use_cache=False)
+        self.assertEqual(r.kind, "local")
+        self.assertEqual(r.verdict.level, Level.SAFE)
+        self.assertGreater(r.files_scanned, 0)
+
+    def test_vetresult_dict_roundtrip(self):
+        r = vet("./tests/corpus/malicious", use_cache=False)
+        d = r.to_dict()
+        v2 = Verdict.from_dict(d["verdict"])
+        self.assertEqual(v2.level, r.verdict.level)
+        self.assertEqual(len(v2.findings), len(r.verdict.findings))
 
 
 class TestCache(unittest.TestCase):

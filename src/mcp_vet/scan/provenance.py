@@ -125,3 +125,59 @@ def from_github(repo: str) -> Provenance:
     if f:
         p.findings.append(f)
     return p
+
+
+# --- thin registry accessors used by the engine -----------------------------
+
+def npm_meta(pkg: str) -> dict:
+    """{'version','tarball','license','source_url','updated'} for npm packages."""
+    data = _get_json(f"https://registry.npmjs.org/{pkg.replace('@', '%40')}")
+    if not data:
+        return {}
+    latest = data.get("dist-tags", {}).get("latest", "")
+    lp = data.get("versions", {}).get(latest, {})
+    return {
+        "version": latest,
+        "tarball": (lp.get("dist") or {}).get("tarball", ""),
+        "license": str(lp.get("license", "unknown")),
+        "source_url": (lp.get("repository") or {}).get("url", "")
+        or data.get("homepage", ""),
+        "updated": (data.get("time") or {}).get(latest, ""),
+        "source": "npm",
+    }
+
+
+def pypi_meta(pkg: str) -> dict:
+    """{'version','sdist_url','wheel_url','license','source_url','updated'}."""
+    data = _get_json(f"https://pypi.org/pypi/{pkg}/json")
+    if not data:
+        return {}
+    info = data.get("info", {})
+    version = info.get("version", "")
+    urls = {u.get("packagetype"): u.get("url", "")
+            for u in data.get("releases", {}).get(version, [])}
+    return {
+        "version": version,
+        "sdist_url": urls.get("sdist", ""),
+        "wheel_url": urls.get("bdist_wheel", ""),
+        "license": info.get("license") or "unknown",
+        "source_url": (info.get("project_urls") or {}).get("Source", "")
+        or info.get("home_page", ""),
+        "updated": (data.get("releases", {}).get(version) or [{}])[0]
+        .get("upload_time_iso_8601", ""),
+        "source": "pypi",
+    }
+
+
+def meta(kind: str, name: str) -> dict:
+    """Dispatch to the right registry accessor (best-effort: {} on failure)."""
+    if kind == "npm":
+        return npm_meta(name)
+    if kind == "pypi":
+        return pypi_meta(name)
+    if kind == "github":
+        g = from_github(name)
+        return {"version": "", "tarball": "",
+                "license": g.license, "source_url": g.source_url,
+                "updated": g.updated, "source": "github"}
+    return {}

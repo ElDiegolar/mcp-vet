@@ -21,8 +21,15 @@ SEND_WITH_CREDS = re.compile(
 )
 
 
+def _literal_url_names(text: str) -> set[str]:
+    """Names assigned a literal https?:// string in this file (dataflow-lite:
+    resolves `API_URL = "https://..."` -> send-to-fixed-host)."""
+    return set(re.findall(r"^\s*(\w+)\s*=\s*[\"']https?://", text, flags=re.M))
+
+
 def scan(text: str, path: str = "") -> list[Finding]:
     findings: list[Finding] = []
+    literals = _literal_url_names(text)
     for pat, label, sev in HARDCODED:
         for m in pat.finditer(text):
             line = text[: m.start()].count("\n") + 1
@@ -43,11 +50,29 @@ def scan(text: str, path: str = "") -> list[Finding]:
             )
     for m in SEND_WITH_CREDS.finditer(text):
         line = text[: m.start()].count("\n") + 1
+        call = m.group(0)
+        # destination resolution (dataflow-lite): if the first arg names a
+        # file-level literal-URL constant, OR the file defines any literal
+        # host URL, the destination is NAMED in the file — normal client auth
+        # (informational), not exfiltration (HIGH). HIGH is reserved for creds
+        # sent to a host the file never names.
+        argm = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", call[call.find("(") + 1:])
+        named_destination = (argm and argm.group(1) in literals) or bool(
+            re.search(r"https?://[^{}$\s/\"'`]+", text))
+        if named_destination:
+            findings.append(
+                Finding(scanner="secrets", severity=Severity.LOW,
+                        message="Credentials sent to a host defined in this "
+                        "file — normal client auth; verify the host is trusted.",
+                        file=path, line=line, evidence=call[:100])
+            )
+            continue
         findings.append(
             Finding(scanner="secrets", severity=Severity.HIGH,
-                    message="Network call appears to transmit credentials — "
-                    "credential exfiltration pattern.",
-                    file=path, line=line, evidence=m.group(0)[:100])
+                    message="Network call appears to transmit credentials to "
+                    "a host not defined anywhere in this file — credential "
+                    "exfiltration pattern.",
+                    file=path, line=line, evidence=call[:100])
         )
     # de-dup: same line + same evidence (e.g. a line mentioning .env twice)
     seen = {(f.line, f.evidence) for f in findings}

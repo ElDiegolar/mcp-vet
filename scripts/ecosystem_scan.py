@@ -11,16 +11,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from mcp_vet.engine import vet  # noqa: E402
 
 TARGETS = [
-    "@modelcontextprotocol/server-filesystem",   # official: local files
-    "@modelcontextprotocol/server-fetch",        # official: fetches URLs (SSRF-shaped by design)
-    "@modelcontextprotocol/server-memory",       # official: knowledge graph
-    "@modelcontextprotocol/server-git",          # official: git ops
-    "@modelcontextprotocol/server-everything",   # official: test kitchen sink
-    "@modelcontextprotocol/server-sequential-thinking",  # official: reasoning
-    "puppeteer-mcp-server",                      # community: browser automation
-    "@playwright/mcp",                           # MS: browser automation
-    "mcp-server-sqlite",                         # community: sqlite
-    "@supabase/mcp-server",                      # community: supabase
+    # official npm (already vetted in the first pass — keep for a stable core)
+    "@modelcontextprotocol/server-filesystem",
+    "@modelcontextprotocol/server-fetch",
+    "@modelcontextprotocol/server-memory",
+    "@modelcontextprotocol/server-git",
+    "@modelcontextprotocol/server-everything",
+    "@modelcontextprotocol/server-sequential-thinking",
+    "puppeteer-mcp-server",
+    "@playwright/mcp",
+    "mcp-server-sqlite",
+    "@supabase/mcp-server",
+    # extension: more official npm servers
+    "@modelcontextprotocol/server-brave-search",   # API-key server
+    "@modelcontextprotocol/server-slack",          # OAuth server
+    "@modelcontextprotocol/server-github",         # API-key server
+    "@modelcontextprotocol/server-postgres",       # DB server
+    "mcp-server-time",                             # official time server
+    # extension: PyPI targets (exercises the pypi: path)
+    "pypi:mcp",                                    # official MCP Python SDK
+    "pypi:fastmcp",                                # FastMCP framework
+    # extension: GitHub targets (exercises the gh: path)
+    "gh:modelcontextprotocol/servers",             # official servers repo
+    "gh:madnh/mcp-server-sqlite",                  # the sqlite server source
+    "gh:modelcontextprotocol/python-sdk",          # python SDK repo
 ]
 
 REPORT = Path(__file__).resolve().parent.parent / "reports"
@@ -48,11 +62,11 @@ for t in TARGETS:
         results.append((t, "ERROR", 0, str(e)[:120]))
         print(f"  ERROR {t}: {e}")
         continue
-    v = r["verdict"]
-    top = "; ".join(f"{f['severity']}:{f['scanner']}" for f in v["findings"][:3])
-    results.append((t, v["level"], len(v["findings"]), top))
-    print(f"  {v['level']:<24} {t}  ({len(v['findings'])} findings, {time.time()-start:.0f}s)")
-    lines.append(f"| {t} | {r.get('version','?')} | **{v['level']}** | {len(v['findings'])} | {top} |")
+    v = r.verdict
+    top = "; ".join(f"{f.severity.value}:{f.scanner}" for f in v.findings[:3])
+    results.append((t, v.level.value, len(v.findings), top))
+    print(f"  {v.level.value:<24} {t}  ({len(v.findings)} findings, {time.time()-start:.0f}s)")
+    lines.append(f"| {t} | {r.version or '?'} | **{v.level.value}** | {len(v.findings)} | {top} |")
 
 blocked = [r for r in results if r[1] == "DO_NOT_INSTALL"]
 review = [r for r in results if r[1] == "REVIEW_BEFORE_INSTALL"]
