@@ -29,7 +29,7 @@ Security / Developer Tools
 | Marketplace | URL | Paste |
 |---|---|---|
 | mcp.so | https://mcp.so/submit | repo URL + short description + tags |
-| Glama | https://glama.ai/mcp | repo URL (auto-imports metadata) |
+| Glama | https://glama.ai/mcp/servers/ElDiegolar/mcp-vet | LIVE — verified Aug 2026 |
 | Smithery | https://smithery.ai | repo URL + short description |
 | PulseMCP | https://pulsemcp.com | repo URL + short description + tags |
 | mcpregistry.com | https://mcpregistry.com | repo URL + short description |
