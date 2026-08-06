@@ -1,6 +1,6 @@
 [project]
 name = "mcp-vetting"
-version = "0.2.0"
+version = "0.2.1"
 description = "Trust-scan gate for MCP servers: evidence-backed verdicts (SAFE/REVIEW/DO_NOT_INSTALL) before you install"
 readme = "README.md"
 requires-python = ">=3.10"

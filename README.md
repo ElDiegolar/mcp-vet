@@ -3,6 +3,8 @@
 **A trust-scan framework for MCP servers: evidence-backed verdicts before you
 install — usable from any harness.**
 
+<!-- mcp-name: io.github.eldiegolar/mcp-vetting -->
+
 ```bash
 uvx --from mcp-vetting mcp-vet @modelcontextprotocol/server-fetch   # one command
 uvx --from mcp-vetting mcp-vet ./my-server --harness hermes          # verdict + config for YOUR harness

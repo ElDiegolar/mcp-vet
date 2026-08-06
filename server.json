@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.eldiegolar/mcp-vetting",
+  "title": "MCP Vet — trust-scan gate",
+  "description": "Vet any MCP server before installing it: static scanners (SSRF, command execution, secrets, auth posture, provenance, dependencies) return an evidence-backed verdict — SAFE_TO_INSTALL, REVIEW_BEFORE_INSTALL or DO_NOT_INSTALL — with file:line findings, plus paste-ready config adapters for Claude Code, Cursor, VS Code and Hermes.",
+  "repository": {
+    "url": "https://github.com/ElDiegolar/mcp-vet",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-vetting",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "command": "mcp-vet-server"
+    }
+  ]
+}
