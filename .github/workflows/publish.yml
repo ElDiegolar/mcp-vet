@@ -28,4 +28,4 @@ jobs:
           python -m unittest discover -s tests
 
       - name: Publish to PyPI (trusted publishing, no token)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@v1.14.2
