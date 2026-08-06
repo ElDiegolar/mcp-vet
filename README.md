@@ -4,9 +4,9 @@
 install — usable from any harness.**
 
 ```bash
-uvx mcp-vet @modelcontextprotocol/server-fetch          # one command
-uvx mcp-vet ./my-server --harness hermes                 # verdict + config for YOUR harness
-uvx mcp-vet pypi:fastmcp --json --gate                   # machine-readable, CI-friendly
+uvx --from mcp-vetting mcp-vet @modelcontextprotocol/server-fetch   # one command
+uvx --from mcp-vetting mcp-vet ./my-server --harness hermes          # verdict + config for YOUR harness
+uvx --from mcp-vetting mcp-vet pypi:fastmcp --json --gate            # machine-readable, CI-friendly
 ```
 
 Verdicts: **SAFE_TO_INSTALL** · **REVIEW_BEFORE_INSTALL** · **DO_NOT_INSTALL** —

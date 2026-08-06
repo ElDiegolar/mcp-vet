@@ -1,5 +1,5 @@
 [project]
-name = "mcp-vet"
+name = "mcp-vetting"
 version = "0.2.0"
 description = "Trust-scan gate for MCP servers: evidence-backed verdicts (SAFE/REVIEW/DO_NOT_INSTALL) before you install"
 readme = "README.md"
