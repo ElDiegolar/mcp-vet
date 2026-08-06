@@ -20,6 +20,9 @@ dependencies = ["fastmcp>=2.0"]
 mcp-vet = "mcp_vet.cli:main"
 mcp-vet-server = "mcp_vet.server:main"
 
+[project.urls]
+Repository = "https://github.com/ElDiegolar/mcp-vet"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
