@@ -146,6 +146,16 @@ class VetResult:
         }
 
 
+def _npm_fallback_meta(npm_meta_: dict, pypi_meta_: dict) -> dict | None:
+    """When the npm tarball is unusable (e.g. a PyPI-only server), fall back
+    to the PyPI package. Returns the PyPI meta (marked) or None."""
+    if npm_meta_.get("tarball"):
+        return None
+    if pypi_meta_ and (pypi_meta_.get("sdist_url") or pypi_meta_.get("wheel_url")):
+        return {**pypi_meta_, "source": "pypi (fallback from npm)"}
+    return None
+
+
 def vet(target: str, use_cache: bool = True, policy: Policy = DEFAULT,
         cache: VerdictCache | None = None) -> VetResult:
     """The framework's single entry point: vet any target, get a VetResult."""
@@ -173,13 +183,24 @@ def vet(target: str, use_cache: bool = True, policy: Policy = DEFAULT,
         try:
             _download(kind, name, Path(td))
         except Exception as e:  # noqa: BLE001
-            return VetResult(target=target, kind=kind, version=version,
-                             verdict=Verdict.from_findings([Finding(
-                                 scanner="provenance", severity=Severity.MEDIUM,
-                                 message=f"failed to download source: {e}",
-                                 file="", line=0, evidence="")]),
-                             provenance=meta, files_scanned=0,
-                             duration_s=time.time() - t0)
+            used_fallback = False
+            if kind == "npm":
+                fb = _npm_fallback_meta(meta, provenance.pypi_meta(name))
+                if fb:
+                    try:
+                        _download("pypi", name, Path(td))
+                        meta, version, used_fallback = (
+                            fb, fb.get("version", ""), True)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not used_fallback:
+                return VetResult(target=target, kind=kind, version=version,
+                                 verdict=Verdict.from_findings([Finding(
+                                     scanner="provenance", severity=Severity.MEDIUM,
+                                     message=f"failed to download source: {e}",
+                                     file="", line=0, evidence="")]),
+                                 provenance=meta, files_scanned=0,
+                                 duration_s=time.time() - t0)
         findings, count = scan_local_dir(Path(td), policy=policy)
     v = Verdict.from_findings(findings)
     if use_cache:

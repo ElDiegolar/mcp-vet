@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from mcp_vet.cache import VerdictCache  # noqa: E402
 from mcp_vet.adapters import config_for, list_adapters  # noqa: E402
-from mcp_vet.engine import resolve_target, scan_local_dir, vet  # noqa: E402
+from mcp_vet.engine import (_npm_fallback_meta, resolve_target,  # noqa: E402
+                            scan_local_dir, vet)
 from mcp_vet.policy import Policy  # noqa: E402
 from mcp_vet.scan import auth, deps, exec as exec_scan, secrets, ssrf  # noqa: E402
 from mcp_vet.verdict import Finding, Level, Severity, Verdict  # noqa: E402
@@ -308,6 +309,22 @@ class TestVetResult(unittest.TestCase):
         v2 = Verdict.from_dict(d["verdict"])
         self.assertEqual(v2.level, r.verdict.level)
         self.assertEqual(len(v2.findings), len(r.verdict.findings))
+
+
+class TestNpmFallback(unittest.TestCase):
+    def test_no_fallback_when_npm_tarball_present(self):
+        self.assertIsNone(_npm_fallback_meta(
+            {"tarball": "https://x.tgz"}, {"sdist_url": "https://y"}))
+
+    def test_fallback_when_npm_empty_and_pypi_exists(self):
+        fb = _npm_fallback_meta({"tarball": ""},
+                                {"sdist_url": "https://y", "version": "2.0"})
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb["source"], "pypi (fallback from npm)")
+        self.assertEqual(fb["version"], "2.0")
+
+    def test_no_fallback_when_both_empty(self):
+        self.assertIsNone(_npm_fallback_meta({"tarball": ""}, {}))
 
 
 class TestCache(unittest.TestCase):

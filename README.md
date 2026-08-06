@@ -39,6 +39,9 @@ npm:pkg            npm registry + tarball        (bare names default to npm)
 pypi:pkg           PyPI JSON + sdist/wheel
 gh:owner/repo      GitHub metadata + source
 ./path             local source directory (offline)
+
+Bare names that fail to resolve on npm (e.g. PyPI-only servers like
+`mcp-server-time`) automatically fall back to PyPI before reporting failure.
 ```
 
 ## Harness adapters (any harness, paste-ready)
