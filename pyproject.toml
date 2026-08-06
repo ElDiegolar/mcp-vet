@@ -1,0 +1,17 @@
+[project]
+name = "mcp-vet"
+version = "0.1.0"
+description = "Trust-scan gate for MCP servers: evidence-backed verdicts before you install"
+requires-python = ">=3.10"
+dependencies = ["fastmcp>=2.0"]
+
+[project.scripts]
+mcp-vet = "mcp_vet.cli:main"
+mcp-vet-server = "mcp_vet.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,77 @@
+"""SSRF / network-exfiltration scanner: outbound HTTP with non-literal hosts."""
+from __future__ import annotations
+
+import re
+
+from mcp_vet.verdict import Finding, Severity
+
+# call sites that take a URL as first arg
+HTTP_CALLS = re.compile(
+    r"\b(?:requests\.(?:get|post|put|delete|patch)|urllib\.request\.urlopen|"
+    r"urlopen|fetch|axios\.(?:get|post|put|delete)|got|node-fetch)\(([^)]*)\)",
+    re.S,
+)
+VAR_HTTP = re.compile(r"https?://\s*[\"\']?\s*(\{|f\"|\$\{)", re.S)
+TEMPLATE_URL = re.compile(r"https?://[^\"'\s]*\{", re.S)
+# variable-looking first arg (not a literal URL string)
+IS_LITERAL_URL = re.compile(r"^[\"']https?://")
+WHITESPACE = re.compile(r"\s+")
+
+
+def _first_arg(inner: str) -> str:
+    inner = WHITESPACE.sub("", inner)
+    if not inner:
+        return ""
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return inner[:i]
+    return inner
+
+
+def _literal_url_names(text: str) -> set[str]:
+    """Names assigned a literal https?:// string in the same file (dataflow-lite:
+    resolves the common `url = "https://..."` false-positive class)."""
+    return set(re.findall(r"^\s*(\w+)\s*=\s*[\"']https?://", text, flags=re.M))
+
+
+def scan(text: str, path: str = "") -> list[Finding]:
+    findings: list[Finding] = []
+    literals = _literal_url_names(text)
+    for m in HTTP_CALLS.finditer(text):
+        arg = _first_arg(m.group(1))
+        if not arg or IS_LITERAL_URL.match(arg) or arg in literals:
+            continue
+        line = text[: m.start()].count("\n") + 1
+        findings.append(
+            Finding(
+                scanner="ssrf",
+                severity=Severity.MEDIUM,
+                message="Outbound HTTP call whose URL is not a literal — "
+                "user/tool-controlled hosts can exfiltrate or probe internal "
+                "networks (SSRF).",
+                file=path,
+                line=line,
+                evidence=arg[:120],
+            )
+        )
+    for m in TEMPLATE_URL.finditer(text):
+        line = text[: m.start()].count("\n") + 1
+        findings.append(
+            Finding(
+                scanner="ssrf",
+                severity=Severity.HIGH,
+                message="URL built from a template/variable (f-string or "
+                "${...}): classic SSRF pattern.",
+                file=path,
+                line=line,
+                evidence=m.group(0)[:120],
+            )
+        )
+    # de-dup adjacent literal findings on same line
+    seen = {(f.line, f.evidence) for f in findings}
+    return [f for f in findings if (f.line, f.evidence) in seen]
